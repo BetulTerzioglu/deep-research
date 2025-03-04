@@ -3,6 +3,7 @@ import { generateObject } from 'ai';
 import { compact } from 'lodash-es';
 import pLimit from 'p-limit';
 import { z } from 'zod';
+import { tavily } from '@tavily/core';
 
 import { o3MiniModel, trimPrompt } from './ai/providers';
 import { systemPrompt } from './prompt';
@@ -35,11 +36,33 @@ type ResearchResult = {
 const ConcurrencyLimit = 2;
 
 // Initialize Firecrawl with optional API key and optional base url
-
 const firecrawl = new FirecrawlApp({
   apiKey: process.env.FIRECRAWL_KEY ?? '',
   apiUrl: process.env.FIRECRAWL_BASE_URL,
 });
+
+// Initialize Tavily with API key
+const tavilyClient = tavily({ 
+  apiKey: process.env.TAVILY_API_KEY ?? '' 
+});
+
+// Function to search using Tavily API
+async function searchWithTavily(query: string) {
+  try {
+    const response = await tavilyClient.search(query, {
+      search_depth: "advanced",
+      include_domains: [],
+      exclude_domains: [],
+      max_results: 10,
+      include_answer: true,
+      include_raw_content: true,
+    });
+    return response;
+  } catch (error) {
+    log('Tavily API error:', error);
+    return null;
+  }
+}
 
 // take en user query, return a list of SERP queries
 async function generateSerpQueries({

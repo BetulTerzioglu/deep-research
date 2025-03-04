@@ -5,20 +5,23 @@ import { RecursiveCharacterTextSplitter } from './text-splitter';
 
 interface CustomOpenAIProviderSettings extends OpenAIProviderSettings {
   baseURL?: string;
+  defaultHeaders?: Record<string, string>;
 }
 
 // Providers
 const openai = createOpenAI({
-  apiKey: process.env.OPENAI_KEY!,
-  baseURL: process.env.OPENAI_ENDPOINT || 'https://api.openai.com/v1',
+  apiKey: process.env.NEBIUS_API_KEY!,
+  baseURL: process.env.NEBIUS_ENDPOINT || 'https://api.studio.nebius.com/v1',
+  defaultHeaders: {
+    'Content-Type': 'application/json',
+  },
 } as CustomOpenAIProviderSettings);
 
-const customModel = process.env.OPENAI_MODEL || 'o3-mini';
+// Nebius modelini kullan
+const customModel = process.env.OPENAI_MODEL || 'meta-llama/Llama-3.3-70B-Instruct';
 
 // Models
-
-export const o3MiniModel = openai(customModel, {
-  reasoningEffort: customModel.startsWith('o') ? 'medium' : undefined,
+export const o3MiniModel = openai(customModel as any, {
   structuredOutputs: true,
 });
 

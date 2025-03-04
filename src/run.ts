@@ -1,5 +1,6 @@
 import * as fs from 'fs/promises';
 import * as readline from 'readline';
+import { tavily } from '@tavily/core';
 
 import { deepResearch, writeFinalReport } from './deep-research';
 import { generateFeedback } from './feedback';
@@ -17,6 +18,11 @@ const rl = readline.createInterface({
   output: process.stdout,
 });
 
+// Initialize Tavily with API key
+const tavilyClient = tavily({ 
+  apiKey: process.env.TAVILY_API_KEY ?? '' 
+});
+
 // Helper function to get user input
 function askQuestion(query: string): Promise<string> {
   return new Promise(resolve => {
@@ -26,10 +32,41 @@ function askQuestion(query: string): Promise<string> {
   });
 }
 
+// Test Tavily API
+async function testTavilyAPI(query: string) {
+  try {
+    log(`Searching with Tavily API for: ${query}`);
+    const response = await tavilyClient.search(query, {
+      search_depth: "basic",
+      max_results: 5,
+      include_answer: true,
+    });
+    log('Tavily API response:');
+    log('Answer:', response.answer);
+    log('Results:', response.results.map(r => r.url).join('\n'));
+    return response;
+  } catch (error) {
+    log('Tavily API error:', error);
+    return null;
+  }
+}
+
 // run the agent
 async function run() {
   // Get initial query
   const initialQuery = await askQuestion('What would you like to research? ');
+
+  // Ask if user wants to test Tavily API
+  const testTavily = await askQuestion('Do you want to test Tavily API first? (y/n): ');
+  
+  if (testTavily.toLowerCase() === 'y') {
+    await testTavilyAPI(initialQuery);
+    const continueResearch = await askQuestion('Continue with full research? (y/n): ');
+    if (continueResearch.toLowerCase() !== 'y') {
+      rl.close();
+      return;
+    }
+  }
 
   // Get breath and depth parameters
   const breadth =
