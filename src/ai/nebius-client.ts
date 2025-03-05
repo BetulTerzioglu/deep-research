@@ -43,6 +43,10 @@ export async function nebiusCompletion(options: NebiusCompletionOptions): Promis
   const model = options.model || process.env.OPENAI_MODEL || 'meta-llama/Llama-3.3-70B-Instruct';
   
   try {
+    // Timeout süresini artırıyoruz (120 saniye)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+    
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -54,7 +58,10 @@ export async function nebiusCompletion(options: NebiusCompletionOptions): Promis
         temperature: options.temperature ?? 0,
         messages: options.messages,
       }),
+      signal: controller.signal,
     });
+    
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text();

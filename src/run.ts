@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as readline from 'readline';
-import { tavily } from '@tavily/core';
+import FirecrawlApp from '@mendable/firecrawl-js';
 
 import { deepResearch, writeFinalReport } from './deep-research';
 import { generateFeedback } from './feedback';
@@ -18,9 +18,10 @@ const rl = readline.createInterface({
   output: process.stdout,
 });
 
-// Initialize Tavily with API key
-const tavilyClient = tavily({ 
-  apiKey: process.env.TAVILY_API_KEY ?? '' 
+// Initialize Firecrawl with optional API key and optional base url
+const firecrawl = new FirecrawlApp({
+  apiKey: process.env.FIRECRAWL_KEY ?? '',
+  apiUrl: process.env.FIRECRAWL_BASE_URL,
 });
 
 // Helper function to get user input
@@ -32,112 +33,139 @@ function askQuestion(query: string): Promise<string> {
   });
 }
 
-// Test Tavily API
-async function testTavilyAPI(query: string) {
+// Test Firecrawl API
+async function testFirecrawlAPI(query: string) {
   try {
-    log(`Searching with Tavily API for: ${query}`);
-    const response = await tavilyClient.search(query, {
-      search_depth: "basic",
-      max_results: 5,
-      include_answer: true,
+    log(`Searching with Firecrawl API for: ${query}`);
+    const response = await firecrawl.search(query, {
+      timeout: 15000,
+      limit: 2,
+      scrapeOptions: { formats: ['markdown'] },
     });
-    log('Tavily API response:');
-    log('Answer:', response.answer);
-    log('Results:', response.results.map(r => r.url).join('\n'));
+    log('Firecrawl API response:');
+    log('Results:', response.data.map(r => r.url).join('\n'));
     return response;
   } catch (error) {
-    log('Tavily API error:', error);
+    log('Firecrawl API error:', error);
     return null;
   }
 }
 
 // run the agent
 async function run() {
-  // Get initial query
-  const initialQuery = await askQuestion('What would you like to research? ');
-
-  // Ask if user wants to test Tavily API
-  const testTavily = await askQuestion('Do you want to test Tavily API first? (y/n): ');
-  
-  if (testTavily.toLowerCase() === 'y') {
-    await testTavilyAPI(initialQuery);
-    const continueResearch = await askQuestion('Continue with full research? (y/n): ');
-    if (continueResearch.toLowerCase() !== 'y') {
-      rl.close();
-      return;
+  try {
+    // Get initial query from user
+    const initialQuery = await askQuestion('What would you like to research? ');
+    
+    // Sorgu uzunluğunu kontrol et
+    if (initialQuery.length > 100) {
+      log('Uyarı: Uzun sorgular zaman aşımına neden olabilir. Sorgunuzu kısaltmanız önerilir.');
+      const continueWithLongQuery = await askQuestion('Uzun sorgu ile devam etmek istiyor musunuz? (y/n): ');
+      if (continueWithLongQuery.toLowerCase() !== 'y') {
+        const shorterQuery = await askQuestion('Lütfen daha kısa bir sorgu girin: ');
+        return await processQuery(shorterQuery);
+      }
     }
+
+    return await processQuery(initialQuery);
+  } catch (error) {
+    log('Error running research:', error);
+    return 1;
+  } finally {
+    rl.close();
   }
+}
 
-  // Get breath and depth parameters
-  const breadth =
-    parseInt(
-      await askQuestion(
-        'Enter research breadth (recommended 2-10, default 4): ',
-      ),
-      10,
-    ) || 4;
-  const depth =
-    parseInt(
-      await askQuestion('Enter research depth (recommended 1-5, default 2): '),
-      10,
-    ) || 2;
+async function processQuery(query: string) {
+  try {
+    // Ask if user wants to test Firecrawl API
+    const testFirecrawl = await askQuestion('Do you want to test Firecrawl API first? (y/n): ');
+    
+    if (testFirecrawl.toLowerCase() === 'y') {
+      await testFirecrawlAPI(query);
+      const continueResearch = await askQuestion('Continue with full research? (y/n): ');
+      if (continueResearch.toLowerCase() !== 'y') {
+        return 0;
+      }
+    }
 
-  log(`Creating research plan...`);
-
-  // Generate follow-up questions
-  const followUpQuestions = await generateFeedback({
-    query: initialQuery,
-  });
-
-  log(
-    '\nTo better understand your research needs, please answer these follow-up questions:',
-  );
-
-  // Collect answers to follow-up questions
-  const answers: string[] = [];
-  for (const question of followUpQuestions) {
-    const answer = await askQuestion(`\n${question}\nYour answer: `);
-    answers.push(answer);
+    // Ask for feedback to clarify research direction
+    log('To better understand your research needs, please answer these follow-up questions:');
+    const feedbackQuestions = await generateFeedback({ query });
+    
+    let additionalInfo = '';
+    for (const question of feedbackQuestions) {
+      const answer = await askQuestion(`${question}\nYour answer: `);
+      additionalInfo += `\n\nQuestion: ${question}\nAnswer: ${answer}`;
+    }
+    
+    // Combine original query with additional info
+    const enhancedQuery = `${query}${additionalInfo}`;
+    
+    // Ask for research parameters
+    log('Creating research plan...');
+    
+    // Default values
+    let breadth = 3;
+    let depth = 2;
+    
+    const customParams = await askQuestion('Do you want to customize research parameters? (y/n): ');
+    if (customParams.toLowerCase() === 'y') {
+      const breadthInput = await askQuestion('Enter breadth (number of queries per level, default 3): ');
+      if (breadthInput.trim() !== '') {
+        breadth = parseInt(breadthInput, 10) || 3;
+      }
+      
+      const depthInput = await askQuestion('Enter depth (levels of research, default 2): ');
+      if (depthInput.trim() !== '') {
+        depth = parseInt(depthInput, 10) || 2;
+      }
+    }
+    
+    // Start research with progress reporting
+    const startTime = Date.now();
+    log(`Starting research with breadth=${breadth}, depth=${depth}`);
+    
+    const { learnings, visitedUrls } = await deepResearch({
+      query: enhancedQuery,
+      breadth,
+      depth,
+      onProgress: (progress) => {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+        const percent = Math.round((progress.completedQueries / progress.totalQueries) * 100) || 0;
+        log(`Progress: ${percent}% (${progress.completedQueries}/${progress.totalQueries} queries) - ${elapsed}s elapsed`);
+        if (progress.currentQuery) {
+          log(`Current query: ${progress.currentQuery}`);
+        }
+      }
+    });
+    
+    // Generate final report
+    log('Generating final report...');
+    const report = await writeFinalReport({
+      prompt: enhancedQuery,
+      learnings,
+      visitedUrls,
+    });
+    
+    // Write report to file
+    const filename = 'report.md';
+    await fs.writeFile(filename, report);
+    log(`Report written to ${filename}`);
+    
+    return 0;
+  } catch (error) {
+    log(`Error running query: ${query}: `, error);
+    
+    // Hata durumunda kullanıcıya daha basit bir sorgu girme seçeneği sun
+    const tryAgain = await askQuestion('Hata oluştu. Daha basit bir sorgu ile tekrar denemek ister misiniz? (y/n): ');
+    if (tryAgain.toLowerCase() === 'y') {
+      const simpleQuery = await askQuestion('Lütfen daha basit bir sorgu girin: ');
+      return await processQuery(simpleQuery);
+    }
+    
+    return 1;
   }
-
-  // Combine all information for deep research
-  const combinedQuery = `
-Initial Query: ${initialQuery}
-Follow-up Questions and Answers:
-${followUpQuestions.map((q: string, i: number) => `Q: ${q}\nA: ${answers[i]}`).join('\n')}
-`;
-
-  log('\nResearching your topic...');
-
-  log('\nStarting research with progress tracking...\n');
-  
-  const { learnings, visitedUrls } = await deepResearch({
-    query: combinedQuery,
-    breadth,
-    depth,
-    onProgress: (progress) => {
-      output.updateProgress(progress);
-    },
-  });
-
-  log(`\n\nLearnings:\n\n${learnings.join('\n')}`);
-  log(
-    `\n\nVisited URLs (${visitedUrls.length}):\n\n${visitedUrls.join('\n')}`,
-  );
-  log('Writing final report...');
-
-  const report = await writeFinalReport({
-    prompt: combinedQuery,
-    learnings,
-    visitedUrls,
-  });
-
-  // Save report to file
-  await fs.writeFile('output.md', report, 'utf-8');
-
-  console.log(`\n\nFinal Report:\n\n${report}`);
-  console.log('\nReport has been saved to output.md');
-  rl.close();
 }
 
 run().catch(console.error);

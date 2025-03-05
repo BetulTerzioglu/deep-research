@@ -3,7 +3,6 @@ import { generateObject } from 'ai';
 import { compact } from 'lodash-es';
 import pLimit from 'p-limit';
 import { z } from 'zod';
-import { tavily } from '@tavily/core';
 
 import { o3MiniModel, trimPrompt } from './ai/providers';
 import { systemPrompt } from './prompt';
@@ -33,7 +32,7 @@ type ResearchResult = {
 };
 
 // increase this if you have higher API rate limits
-const ConcurrencyLimit = 2;
+const ConcurrencyLimit = 1;
 
 // Initialize Firecrawl with optional API key and optional base url
 const firecrawl = new FirecrawlApp({
@@ -41,25 +40,17 @@ const firecrawl = new FirecrawlApp({
   apiUrl: process.env.FIRECRAWL_BASE_URL,
 });
 
-// Initialize Tavily with API key
-const tavilyClient = tavily({ 
-  apiKey: process.env.TAVILY_API_KEY ?? '' 
-});
-
-// Function to search using Tavily API
-async function searchWithTavily(query: string) {
+// Function to search using Firecrawl API
+async function searchWithFirecrawl(query: string) {
   try {
-    const response = await tavilyClient.search(query, {
-      search_depth: "advanced",
-      include_domains: [],
-      exclude_domains: [],
-      max_results: 10,
-      include_answer: true,
-      include_raw_content: true,
+    const response = await firecrawl.search(query, {
+      timeout: 15000,
+      limit: 3,
+      scrapeOptions: { formats: ['markdown'] },
     });
     return response;
   } catch (error) {
-    log('Tavily API error:', error);
+    log('Firecrawl API error:', error);
     return null;
   }
 }
@@ -76,16 +67,19 @@ async function generateSerpQueries({
   // optional, if provided, the research will continue from the last learning
   learnings?: string[];
 }) {
+  const system = systemPrompt();
+  const user = `Given the following prompt from the user, generate a list of SERP queries to research the topic. Return a maximum of ${numQueries} queries, but feel free to return less if the original prompt is clear. Make sure each query is unique and not similar to each other: <prompt>${query}</prompt>\n\n${
+    learnings
+      ? `Here are some learnings from previous research, use them to generate more specific queries: ${learnings.join(
+          '\n',
+        )}`
+      : ''
+  }`;
+  
   const res = await generateObject({
     model: o3MiniModel,
-    system: systemPrompt(),
-    prompt: `Given the following prompt from the user, generate a list of SERP queries to research the topic. Return a maximum of ${numQueries} queries, but feel free to return less if the original prompt is clear. Make sure each query is unique and not similar to each other: <prompt>${query}</prompt>\n\n${
-      learnings
-        ? `Here are some learnings from previous research, use them to generate more specific queries: ${learnings.join(
-            '\n',
-          )}`
-        : ''
-    }`,
+    abortSignal: AbortSignal.timeout(180000), // 180 saniye (3 dakika) timeout
+    prompt: user,
     schema: z.object({
       queries: z
         .array(
@@ -101,6 +95,7 @@ async function generateSerpQueries({
         .describe(`List of SERP queries, max of ${numQueries}`),
     }),
   });
+
   log(
     `Created ${res.object.queries.length} queries`,
     res.object.queries,
@@ -125,13 +120,15 @@ async function processSerpResult({
   );
   log(`Ran ${query}, found ${contents.length} contents`);
 
+  const system = systemPrompt();
+  const user = `Given the following contents from a SERP search for the query <query>${query}</query>, generate a list of learnings from the contents. Return a maximum of ${numLearnings} learnings, but feel free to return less if the contents are clear. Make sure each learning is unique and not similar to each other. The learnings should be concise and to the point, as detailed and information dense as possible. Make sure to include any entities like people, places, companies, products, things, etc in the learnings, as well as any exact metrics, numbers, or dates. The learnings will be used to research the topic further.\n\n<contents>${contents
+    .map(content => `<content>\n${content}\n</content>`)
+    .join('\n')}</contents>`;
+  
   const res = await generateObject({
     model: o3MiniModel,
-    abortSignal: AbortSignal.timeout(60_000),
-    system: systemPrompt(),
-    prompt: `Given the following contents from a SERP search for the query <query>${query}</query>, generate a list of learnings from the contents. Return a maximum of ${numLearnings} learnings, but feel free to return less if the contents are clear. Make sure each learning is unique and not similar to each other. The learnings should be concise and to the point, as detailed and information dense as possible. Make sure to include any entities like people, places, companies, products, things, etc in the learnings, as well as any exact metrics, numbers, or dates. The learnings will be used to research the topic further.\n\n<contents>${contents
-      .map(content => `<content>\n${content}\n</content>`)
-      .join('\n')}</contents>`,
+    abortSignal: AbortSignal.timeout(180000), // 180 saniye (3 dakika) timeout
+    prompt: user,
     schema: z.object({
       learnings: z
         .array(z.string())
@@ -167,10 +164,13 @@ export async function writeFinalReport({
     150_000,
   );
 
+  const system = systemPrompt();
+  const user = `Given the following prompt from the user, write a final report on the topic using the learnings from research. Make it as as detailed as possible, aim for 3 or more pages, include ALL the learnings from research:\n\n<prompt>${prompt}</prompt>\n\nHere are all the learnings from previous research:\n\n<learnings>\n${learningsString}\n</learnings>`;
+  
   const res = await generateObject({
     model: o3MiniModel,
-    system: systemPrompt(),
-    prompt: `Given the following prompt from the user, write a final report on the topic using the learnings from research. Make it as as detailed as possible, aim for 3 or more pages, include ALL the learnings from research:\n\n<prompt>${prompt}</prompt>\n\nHere are all the learnings from previous research:\n\n<learnings>\n${learningsString}\n</learnings>`,
+    abortSignal: AbortSignal.timeout(300000), // 300 saniye (5 dakika) timeout
+    prompt: user,
     schema: z.object({
       reportMarkdown: z
         .string()
@@ -229,11 +229,17 @@ export async function deepResearch({
     serpQueries.map(serpQuery =>
       limit(async () => {
         try {
-          const result = await firecrawl.search(serpQuery.query, {
-            timeout: 15000,
-            limit: 5,
-            scrapeOptions: { formats: ['markdown'] },
-          });
+          const result = await searchWithFirecrawl(serpQuery.query);
+          
+          // Eğer result null ise, boş bir sonuç döndür
+          if (!result) {
+            log(`No results found for query: ${serpQuery.query}`);
+            return {
+              learnings: [],
+              followUpQuestions: [],
+              visitedUrls: []
+            };
+          }
 
           // Collect URLs from this search
           const newUrls = compact(result.data.map(item => item.url));
